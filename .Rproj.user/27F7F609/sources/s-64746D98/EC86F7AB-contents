@@ -1,0 +1,166 @@
+
+
+rm(list=ls())
+library(memisc)
+library(assertthat)
+library(sqldf)
+library(magrittr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(ggthemes)
+
+######################################################################################################
+## Helper functions
+######################################################################################################
+
+
+
+# Derive type of course from level of course - updated  to uQube categories
+derive_type_of_course <- function(level_of_course_vector) {
+  cases(
+    "Enabling"= level_of_course_vector %in% c('Enabling courses'),
+    "Undergraduate"= level_of_course_vector %in% c('Advanced Diploma (AQF)',
+                                                   'Associate Degree', 
+                                                   'Bachelor\'s Graduate Entry', 
+                                                   'Bachelor\'s Honours', 
+                                                   'Bachelor\'s Pass',
+                                                   'Diploma (AQF)',
+                                                   'Other undergraduate award courses'),
+    "Postgraduate"= level_of_course_vector %in% c('Doctorate by Coursework',
+                                        'Doctorate by Research',
+                                        'Grad.(Post) Dip. - ext area',
+                                        'Grad.(Post) Dip. - new area',
+                                        'Graduate Certificate',
+                                        'Master\'s by Coursework',
+                                        'Master\'s by Research',
+                                        'Masters (extended)'
+                                        ),
+    "non-award"= level_of_course_vector %in% c('Non-award courses',
+                                               'Postgrad. Qual/Prelim.'),
+    "z. UNKNOWN"=TRUE
+  )}
+
+
+perform_groupby <- function(csv_name) {
+  # Input:
+  #       csv_name: Name of the csv to be aggregated
+  # Output:
+  #       Export: Data Frame after performing group by and reaggregation
+  
+  import <- read.csv(paste0("./Temp/", csv_name), stringsAsFactors = F)
+  names(import) <- tolower(names(import))
+  
+  ## 1) Derive type_of_course
+  table(import$level_of_course)
+  import$type_of_course <- derive_type_of_course(import$level_of_course)
+  
+  
+  ## 2) Select, reorder and rename relevant columns
+  names(import)
+  import <- 
+    import[,c('ref_year'
+              , 'state'
+              , 'institution'
+              , 'type_of_course'
+              , 'campus_post'
+              , 'broad_foe'
+              , 'count')]
+  
+  assert_that(length(names(import)) == 7)
+  
+  
+  ## 3) Perform Group By
+  export <-   import %>% 
+    filter(type_of_course %in% c("Undergraduate", "Postgraduate")) %>% 
+    filter(substr(campus_post,1,1) == 'A') %>% 
+    mutate(campus_postcode = as.numeric(substr(campus_post,2,5))) %>% 
+    group_by(ref_year, state, institution, type_of_course, campus_postcode, broad_foe) %>% 
+    summarise(count = sum(count)) %>% 
+    ungroup %>% 
+    as.data.frame()
+  
+  return (export)
+  
+}
+
+
+pivot_by_postcode <- function(data, type_of_course_filter) {
+  # Input:
+  #       type_of_course_filter: UG/PG
+  # Output:
+  #       Pivotted Dataframe
+  
+  s0 = data %>% filter(type_of_course == type_of_course_filter)
+  s1 = melt(s0, id = c("campus_postcode", "broad_foe"), measure.vars = "count")
+  s2 = dcast(s1, campus_postcode ~ broad_foe, sum)
+  
+  s2$Total = rowSums(s2[,2:NCOL(s2)])
+  return(s2)
+}
+
+plot_bar_charts <- function (plot_data, type_of_course){
+  # Input: 
+  #       Plot_data to be filtered
+  #       Type_of_course for title
+  # Output: 
+  #       PDF written to disk. Bar chart count by FOE by Postcode
+  
+  plot_data = plot_data %>% filter(Total >= 1000)  
+  
+  
+  # Iterate through plot_data row-wise
+  for (row_i in 1:NROW(plot_data)){
+    row_data = plot_data[row_i, ] 
+    post_code_i = row_data$campus_postcode
+    
+    row_data = row_data[3:NCOL(plot_data)-1] # ignore postcode column, and total column
+    melt_df = melt(row_data)
+    
+    # Naming steps
+    plot_title = paste0(type_of_course, " - ", post_code_i)
+    pdf_file_name = paste0("./Results/Enrollment by Campus Postcode/", plot_title, ".pdf")
+    
+    # Exports PDF
+    pdf(pdf_file_name)
+    
+    bp <- ggplot(melt_df, aes(x= variable, y = value))+
+      geom_col() + theme_igray() + scale_colour_tableau() + coord_flip() +
+      labs(title=plot_title,
+           y ="Count", x = "Broad FOE")
+    print(bp)
+    
+    dev.off()
+  }
+}
+
+######################################################################################################
+################################## Main Logic
+######################################################################################################
+
+
+go = perform_groupby("2016_GO8.csv")
+non_go = perform_groupby("2016_NON_GO8.csv")
+
+data = rbind(go,non_go)
+data = data %>%
+  filter(state == "NSW") %>% 
+  filter(campus_postcode >= 2000 & campus_postcode < 3000 
+         & campus_postcode != 2899
+         & campus_postcode != 2898)
+
+UG = pivot_by_postcode(data, "Undergraduate")
+PG = pivot_by_postcode(data, "Postgraduate")
+
+
+write.csv(UG, "./Temp/UG_Pivot.csv", row.names = F)
+write.csv(PG, "./Temp/PG_Pivot.csv", row.names = F)
+
+
+
+
+plot_data = UG 
+type_of_course = "Undergraduate"
+plot_bar_charts(UG, "Undergraduate")
+plot_bar_charts(PG, "Postgraduate")
+

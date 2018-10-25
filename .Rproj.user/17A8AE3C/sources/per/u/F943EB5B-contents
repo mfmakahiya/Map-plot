@@ -1,0 +1,89 @@
+
+rm(list=ls())
+library(memisc)
+library(assertthat)
+library(sqldf)
+library(magrittr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(oz)
+library(scatterpie)
+library(rgdal)
+library(maptools)
+
+# Data preparation
+death_data <- data_prep("death2014.csv")
+grouped_data <- perform_groupby(death_data, "", "Data tabulated by year of occurrence")
+
+# Top 10 leading cause overall
+overall_data <- grouped_data %>%
+  group_by(death_cause) %>%
+  summarise(totalcount = sum(count)) %>%
+  ungroup %>%
+  as.data.frame()
+
+overall_data <- overall_data[order(-overall_data$totalcount), ]
+top_ten_causes <- overall_data[2:10, "death_cause"]
+
+pivotted_data <- pivot_by_country(grouped_data)
+
+# Getting the coordinates of each country
+country_lookup <- read.csv(paste0("./Data/", "countries.csv"), stringsAsFactors = F)
+names(country_lookup)[1] <- "country_code"
+
+# Combining data
+final_data <- merge(x = pivotted_data, y = country_lookup, by.x = "country", by.y = "name", all.x = T)
+
+# Using map_data()
+worldmap <- map_data ("world")
+
+mapplot1 <- ggplot(worldmap) + 
+  geom_map(data = worldmap, map = worldmap, 
+           aes(x=long, y=lat, map_id=region), col = "white", fill = "gray50")+
+  geom_scatterpie(aes(x=longitude, y=latitude, group = country, r = multiplier*6), 
+                  data = final_data, cols = colnames(final_data[,c(2:11)]))+
+  xlim(-20,60) + ylim(10, 75) +
+  scale_fill_brewer(palette = "Paired") +
+  geom_text(aes(x=longitude, y=latitude, group = country, label = country), 
+            data = final_data, stat = "identity",
+            position = position_dodge(width = 0.75), hjust = 1.5, 
+            #vjust = -1.5, size = 5, angle = 45,
+            check_overlap = TRUE, na.rm = FALSE, show.legend = NA, 
+            inherit.aes = TRUE) +
+  labs(x = "Longitude", y = "Latitude") +
+  ggtitle("Causes of death by country") +
+  theme(legend.position = "top")
+
+mapplot1
+
+# Using borders()
+mapplot2 <- ggplot(data = final_data, aes(x=longitude, y=latitude), group = country) +
+  borders("world", colour="gray50", fill="gray50")
+
+mapplot2
+
+# Using shapefile / geom_polygon
+SHAPE_FILE_PATH = "./Data/World_Countries/World_Countries.shp"
+world <- readOGR(dsn = SHAPE_FILE_PATH)
+
+world <- fortify(world)
+
+mapplot3 <- ggplot(data = world, aes(long, lat, group=group)) +
+  geom_polygon(color = "white", fill  = "gray50")
+
+mapplot3
+
+
+
+
+ +
+  #xlim(-20,60) + ylim(10, 75) +
+  scale_fill_brewer(palette = "Paired") +
+  geom_text(aes(x=longitude, y=latitude, group = country, label = country), data = final_data, stat = "identity",
+            position = position_dodge(width = 0.75), hjust = 1.5, #vjust = -1.5, size = 5, angle = 45,
+            check_overlap = TRUE, na.rm = FALSE, show.legend = NA, 
+            inherit.aes = TRUE) +
+  labs(x = "Longitude", y = "Latitude") +
+  ggtitle("Causes of death by country") +
+  theme(legend.position = "top")

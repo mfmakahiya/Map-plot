@@ -1,0 +1,182 @@
+
+
+rm(list=ls())
+library(memisc)
+library(assertthat)
+library(sqldf)
+library(magrittr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(oz)
+library(scatterpie)
+library(rgdal)
+library(maptools)
+
+######################################################################################################
+## Helper functions
+######################################################################################################
+
+
+
+# Derive type of course from level of course - updated  to uQube categories
+derive_type_of_course <- function(level_of_course_vector) {
+  cases(
+    "Enabling"= level_of_course_vector %in% c('Enabling courses'),
+    "Undergraduate"= level_of_course_vector %in% c('Advanced Diploma (AQF)',
+                                                   'Associate Degree', 
+                                                   'Bachelor\'s Graduate Entry', 
+                                                   'Bachelor\'s Honours', 
+                                                   'Bachelor\'s Pass',
+                                                   'Diploma (AQF)',
+                                                   'Other undergraduate award courses'),
+    "Postgraduate"= level_of_course_vector %in% c('Doctorate by Coursework',
+                                                  'Doctorate by Research',
+                                                  'Grad.(Post) Dip. - ext area',
+                                                  'Grad.(Post) Dip. - new area',
+                                                  'Graduate Certificate',
+                                                  'Master\'s by Coursework',
+                                                  'Master\'s by Research',
+                                                  'Masters (extended)'
+    ),
+    "non-award"= level_of_course_vector %in% c('Non-award courses',
+                                               'Postgrad. Qual/Prelim.'),
+    "z. UNKNOWN"=TRUE
+  )}
+
+
+perform_groupby <- function(csv_name) {
+  # Input:
+  #       csv_name: Name of the csv to be aggregated
+  # Output:
+  #       Export: Data Frame after performing group by and reaggregation
+  
+  import <- read.csv(paste0("./Temp/", csv_name), stringsAsFactors = F)
+  names(import) <- tolower(names(import))
+  
+  ## 1) Derive type_of_course
+  table(import$level_of_course)
+  import$type_of_course <- derive_type_of_course(import$level_of_course)
+  
+  
+  ## 2) Select, reorder and rename relevant columns
+  names(import)
+  import <- 
+    import[,c('ref_year'
+              , 'state'
+              , 'institution'
+              , 'type_of_course'
+              , 'campus_post'
+              , 'broad_foe'
+              , 'count')]
+  #import$broad_foe <- substr(import$broad_foe, 0, 15)
+  assert_that(length(names(import)) == 7)
+  
+  
+  ## 3) Perform Group By
+  export <-   import %>% 
+    filter(type_of_course %in% c("Undergraduate", "Postgraduate")) %>% 
+    filter(substr(campus_post,1,1) == 'A') %>% 
+    mutate(campus_postcode = as.numeric(substr(campus_post,2,5))) %>% 
+    group_by(ref_year, state, institution, type_of_course, campus_postcode, broad_foe) %>% 
+    summarise(count = sum(count)) %>% 
+    ungroup %>% 
+    as.data.frame()
+  
+  return (export)
+  
+}
+
+
+pivot_by_postcode <- function(data) {
+  # Input:
+  #       type_of_course_filter: UG/PG
+  # Output:
+  #       Pivotted Dataframe
+  
+  s1 = melt(data, id = c("campus_postcode", "broad_foe"), measure.vars = "count")
+  s2 = dcast(s1, campus_postcode ~ broad_foe, sum)
+  
+  s2$Total = rowSums(s2[,2:NCOL(s2)])
+  return(s2)
+}
+
+######################################################################################################
+################################## Main Logic
+######################################################################################################
+
+
+go = perform_groupby("2016_GO8.csv")
+non_go = perform_groupby("2016_NON_GO8.csv")
+
+data = rbind(go,non_go)
+data = data %>%
+  filter(state == "NSW") %>% 
+  filter(campus_postcode >= 2000 & campus_postcode < 3000 
+         & campus_postcode != 2899
+         & campus_postcode != 2898)
+
+data = data %>%
+  group_by(ref_year, state, institution, campus_postcode, broad_foe) %>%
+  summarise(count = sum(count)) %>%
+  ungroup %>%
+  as.data.frame()
+
+# Pivot the combined Undergraduate and Postgraduate data
+combined_data = pivot_by_postcode(data)
+
+# Get coordinates
+Source_file_path = "../../Data/DeptEducation/AU Postcodes LonLat.csv"
+
+postcode_lookup <- read.csv(Source_file_path, stringsAsFactors = F)
+colnames(postcode_lookup)[1] <- "campus_postcode"
+postcode_lookup <- postcode_lookup[, c("campus_postcode", "long", "lat")] 
+
+# Get coordinates of campus post codes
+combined_data = merge(x = combined_data, y = postcode_lookup, by = "campus_postcode", all.x = T)
+
+# Data cleaning
+combined_data = unique(combined_data)
+combined_data = combined_data %>%
+  filter (long >= 150.5, long <= 151.35, lat >= -34.1, lat <= -33.55)
+
+n <- nrow(combined_data)
+combined_data = combined_data[order(combined_data$Total),]
+
+# Scale pie chart to the log of total enrollments
+
+multiplier <- log10(combined_data$Total) / log10(max(combined_data$Total))
+combined_data <- cbind(combined_data, multiplier)
+
+# Map of NSW
+SHAPE_FILE_PATH = "../../Data/DeptEducation/POA_2016_AUST.shp"
+nsw <- readOGR(dsn = SHAPE_FILE_PATH)
+
+nsw <- nsw[(as.numeric(as.character(nsw@data$POA_CODE16)) >= 2000 &
+         as.numeric(as.character(nsw@data$POA_CODE16)) < 3000 &
+         as.numeric(as.character(nsw@data$POA_CODE16)) != 2898 &
+         as.numeric(as.character(nsw@data$POA_CODE16)) != 2898),]
+
+nsw <- fortify(nsw, region = "POA_CODE16")
+
+# Plot the pies in the map
+map_plot <- ggplot(data=nsw, aes(long, lat, group=group)) +
+  geom_polygon(color = "white", fill  = "grey") +
+  xlim(150.9,151.32) + ylim(-34.0, -33.7) +
+  geom_scatterpie(aes(x=long, y=lat, group = campus_postcode, r = 0.010*multiplier), 
+                  data = combined_data, cols = colnames(combined_data[,c(2:11)])) +
+  geom_text(aes(x=long, y=lat, group = campus_postcode, label = campus_postcode), data = combined_data, stat = "identity",
+            position = position_dodge(width = 0.75), hjust = 1.5, vjust = -1.5, size = 5, angle = 45,
+            check_overlap = TRUE, na.rm = FALSE, show.legend = NA, 
+            inherit.aes = TRUE) +
+  labs(title = "Distribution of Field of Education per campus post code", x = "Longitude", y = "Latitude") +
+  theme(legend.position="top")
+map_plot
+
+# Try ggplot
+ggsave(filename = "./Results/3. Map plot - Distribution of FOE by postcode.pdf", map_plot,
+       width = 297,
+       height = 210,
+       units = "mm",
+       device = "pdf"
+)
